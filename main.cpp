@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <libnet.h>
@@ -8,10 +7,17 @@
 #include <linux/netfilter.h>
 #include <errno.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <algorithm>
+#include <string>
+#include <fstream>
+#include <vector>
+#include <iostream>
+#include <sstream>
+
 
 #define HOSTNAME_MAX_SIZE 64
 
-char host[HOSTNAME_MAX_SIZE];
+std::vector<std::string> hostlist;
 
 bool is_ipv4_pkt(u_char* header) {
 	libnet_ipv4_hdr* ipv4_hdr = (libnet_ipv4_hdr*)header;
@@ -20,36 +26,68 @@ bool is_ipv4_pkt(u_char* header) {
 	return true;
 }
 
-int locate_host(u_char* data, u_char** out) {
-	u_char* payload = data;
-	payload += sizeof(libnet_ipv4_hdr);
-	payload += sizeof(libnet_tcp_hdr);
-
-	bool host_found = false;
+int locate_host(u_char* data, char* out) {
+	data += sizeof(libnet_ipv4_hdr);
+	data += sizeof(libnet_tcp_hdr);
+	
+	char* host_start;
+	bool found = false;
 	for (int i=0; i<32; i++) {
-		if ((data[i]|0x20) != 'h') continue;
-		if ((data[i+1]|0x20) != 'o') continue;
-		if ((data[i+2]|0x20) != 's') continue;
-		if ((data[i+3]|0x20) != 't') continue;
-		host_found = true;
-		*out = data+i;
+		if ((data[i]) != 'H') continue;
+		if ((data[i+1]) != 'o') continue;
+		if ((data[i+2]) != 's') continue;
+		if ((data[i+3]) != 't') continue;
+		if ((data[i+4]) != ':') continue;
+		if ((data[i+5]) != ' ') continue;
+
+		found = true;
+		host_start = (char*)data+i+6;
 	}
-	if (!host_found) return 0;
+	if (!found) return 0;
 
-	char* host_end = strstr(*out, "\r\n");
-	if (host_end == NULL) return 0;
+	char* host_end;
+	int len;
 
-	int len = host_end - *out;
+	found = false;
+	for (int i=0; i<HOSTNAME_MAX_SIZE; i++) {
+		if (host_start[i] != '\r') continue;
+		if (host_start[i+1] != '\n') continue;
+
+		found = true;
+		host_start[i] = 0;
+		host_end = host_start+i;
+		len = i;
+	}
+	if (!found) return 0;
 	if ((len > HOSTNAME_MAX_SIZE) || (len < 1)) return 0;
-
+	strncpy(out, host_start, len);
 	return len;
 }
 
-bool is_match_host(u_char* data) {
-	char* match = strstr((char*)data, host);
+bool match(std::string a, std::string b) { return (a < b); }
+bool comp(std::string a, std::string b) { return (a < b); }
 
-	if (match == NULL) return false;
-	return true;
+bool binary_search(std::vector<std::string> list, std::string key, int left, int right)
+{
+    if (left > right) return false;
+    int mid = left + (right - left) / 2;
+    if (list[mid] == key)
+        return true;
+    else if (list[mid] < key)
+        return binary_search(list, key, mid + 1, right);
+    return binary_search(list, key, left, mid - 1);
+}
+
+bool check_all_host(u_char* data) {
+	char data_host_char[HOSTNAME_MAX_SIZE];
+	if (locate_host(data, data_host_char) == 0) return false;
+
+	std::string data_host(data_host_char);
+	printf("Host: %s\n", data_host.c_str());
+
+	bool match = binary_search(hostlist, data_host, 0, hostlist.size()-1);
+	if (match) return true;
+	else return false;
 }
 
 static bool check_pkt(struct nfq_data* tb, u_int32_t* id) {
@@ -64,8 +102,7 @@ static bool check_pkt(struct nfq_data* tb, u_int32_t* id) {
 
 	if (!is_ipv4_pkt(data)) return false;
 	puts("ipv4 packet.");
-	
-	if (!is_match_host(data)) return false;
+	if (!check_all_host(data)) return false;
 	puts("host matched.");
 
 	return true;
@@ -89,13 +126,23 @@ int main(int argc, char **argv)
 	char buf[4096] __attribute__ ((aligned));
 
 	if (argc != 2) {
-		puts("syntax : netfilter-test <host>");
-		puts("sample : netfilter-test test.gilgil.net");
+		puts("syntax : 1m-block <site list file>");
+		puts("sample : 1m-block top-1m.txt");
 		exit(EXIT_FAILURE);
 	}
 
-	strncpy(host, argv[1], HOSTNAME_MAX_SIZE);
+	std::string line;
+	std::ifstream ifs;
+	ifs.open(argv[1]);
 
+	for (;!ifs.eof(); std::getline(ifs, line, '\n')) {
+		std::string host = line.substr(line.find(',')+1);
+		hostlist.push_back(host);
+	}
+	std::sort(hostlist.begin(), hostlist.end(), comp);
+
+	for (int i = 0; i < 10; i++)
+		printf("%s\n\n", hostlist[i].c_str());
 	printf("opening library handle\n");
 	h = nfq_open();
 	if (!h) {
