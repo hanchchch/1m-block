@@ -141,8 +141,6 @@ int main(int argc, char **argv)
 	}
 	std::sort(hostlist.begin(), hostlist.end(), comp);
 
-	for (int i = 0; i < 10; i++)
-		printf("%s\n\n", hostlist[i].c_str());
 	printf("opening library handle\n");
 	h = nfq_open();
 	if (!h) {
